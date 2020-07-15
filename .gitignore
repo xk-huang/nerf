@@ -1,0 +1,10 @@
+env/
+.vscode/
+.empty/
+data/*
+!data/*.py
+logs/
+results/
+**/.ipynb_checkpoints
+**/__pycache__
+*.ipynb
