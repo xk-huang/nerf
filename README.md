@@ -1,6 +1,6 @@
 # NeRF
 
-A re-implementation of Neural Radiance Field.
+A re-implementation of Neural Radiance Fields (NeRF).
 
 ## Usage
 

@@ -35,13 +35,18 @@ def get_embedder(multires, i=0):
     embed = lambda x, eo=embedder_obj : eo(x)
     return embed, embedder_obj.out_dims
 
-def create_nerf(config, device):
+
+def create_nerf(config, device, out_dir):
     embed_fn, input_ch = get_embedder(config.multires, config.i_embed)
 
     input_ch_views = 0
     embeddirs_fn = None
     if config.use_viewdirs:
         embeddirs_fn, input_ch_views = get_embedder(config.multires_views, config.i_embed)
+    
+    '''
+    Create networks
+    '''
     output_ch = 4
     skips = [4]
     model_coarse = NeRF(D=config.netdepth, W=config.netwidth,
@@ -56,35 +61,38 @@ def create_nerf(config, device):
                           input_ch_views=input_ch_views, use_viewdirs=config.use_viewdirs).to(device)
         grad_vars += list(model_fine.parameters())
 
+    '''
+    Create an optimizer
+    '''
+    optimizer = torch.optim.Adam(params=grad_vars, lr=config.lrate, betas=(0.9, 0.999))
+
+    '''
+    Load checkpoints
+    '''
     start_iter = 0
-    # basedir = config.basedir
-    # expname = config.expname
+    ckpts = [os.path.join(out_dir, f) for f in sorted(os.listdir(out_dir)) if '.tar' in f]
+    
+    print('Found ckpts', ckpts)
+    if len(ckpts) > 0 and not config.no_reload:
+        # Reload the latest ckpt
+        ckpt_path = ckpts[-1]
+        print('Reloading from', ckpt_path)
+        ckpt = torch.load(ckpt_path)
 
-    ##########################
+        # Load training steps
+        start_iter = ckpt['global_steps'] + 1
 
-    # Load checkpoints
-    # if config.ft_path is not None and config.ft_path!='None':
-    #     ckpts = [config.ft_path]
-    # else:
-    #     ckpts = [os.path.join(basedir, expname, f) for f in sorted(os.listdir(os.path.join(basedir, expname))) if 'tar' in f]
+        # Load optimizer states
+        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
 
-    # print('Found ckpts', ckpts)
-    # if len(ckpts) > 0 and not config.no_reload:
-    #     ckpt_path = ckpts[-1]
-    #     print('Reloading from', ckpt_path)
-    #     ckpt = torch.load(ckpt_path, map_location=device)
+        # Load network weights
+        model_coarse.load_state_dict(ckpt['network_coarse_state_dict'])
+        if model_fine is not None:
+            model_fine.load_state_dict(ckpt['network_fine_state_dict'])
+    else:
+       print('No ckpt reloaded') 
 
-    #     start_iter = ckpt['global_steps'] + 1
-    #     optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-
-    #     # Load model
-    #     model_coarse.load_state_dict(ckpt['network_fn_state_dict'])
-    #     if model_fine is not None:
-    #         model_fine.load_state_dict(ckpt['network_fine_state_dict'])
-
-    ##########################
-
-    return start_iter, grad_vars, model_coarse, model_fine, embed_fn, embeddirs_fn
+    return start_iter, optimizer, model_coarse, model_fine, embed_fn, embeddirs_fn
 
 
 def train_pipeline(config, device, out_dir):
@@ -184,14 +192,14 @@ def train_pipeline(config, device, out_dir):
     if config.render_test:
         render_poses = np.array(poses[i_test])
 
+    print('TRAIN views:', i_train)
+    print('TEST views:', i_test)
+    print('VAL views:', i_val)
+
     # Cast intrinsics to right types
     H, W, focal = hwf
     H, W = int(H), int(W)
     hwf = [H, W, focal]
-
-    print('TRAIN views:', i_train)
-    print('TEST views:', i_test)
-    print('VAL views:', i_val)
 
 
     '''
@@ -216,40 +224,46 @@ def train_pipeline(config, device, out_dir):
     print('>>> Creating models')
 
     # Create nerf model
-    start_iter, grad_vars, model_coarse, model_fine, embed_fn, embeddirs_fn  = create_nerf(config, device)
+    start_iter, optimizer, model_coarse, model_fine, embed_fn, embeddirs_fn  = create_nerf(config, device, out_dir)
     # Training steps
     global_steps = start_iter
     # Create volume renderer
     renderer = VolumeRenderer(config, model_coarse, model_fine, embed_fn, embeddirs_fn, near, far)
-    # Create optimizer
-    optimizer = torch.optim.Adam(params=grad_vars, lr=config.lrate, betas=(0.9, 0.999))
 
-    # Move testing data to GPU
-    render_poses = torch.Tensor(render_poses).to(device)
 
-    # Short circuit if only rendering out from trained model
-    # if config.render_only:
-    #     print('RENDER ONLY')
-    #     with torch.no_grad():
-    #         if config.render_test:
-    #             # render_test switches to test poses
-    #             images = images[i_test]
-    #         else:
-    #             # Default is smoother render_poses path
-    #             images = None
+    '''
+    Only render results by pre-trained models
+    '''
 
-    #         testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format('test' if config.render_test else 'path', start_iter))
-    #         os.makedirs(testsavedir, exist_ok=True)
-    #         print('test poses shape', render_poses.shape)
+    if config.render_only:
+        print('>>> Render only')
 
-    #         rgbs, _ = render_path(render_poses, hwf, config.chunk, render_kwargs_test, gt_imgs=images, savedir=testsavedir, render_factor=config.render_factor)
-    #         print('Done rendering', testsavedir)
-    #         imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
+        # Move testing data to GPU
+        render_poses = torch.Tensor(render_poses).to(device)
 
-    #         return
+        # Path to save rendering results
+        render_save_dir = os.path.join(out_dir, 'renderonly_{:06d}'.format(global_steps))
+        os.makedirs(render_save_dir, exist_ok=True)
+
+        save_img_fn = lambda j, img: save_image(j, img, render_save_dir)
+        save_video_fn = lambda imgs: save_video(global_steps, imgs, render_save_dir)
+
+        print('Rendering (iter=%s):' % global_steps)
+        
+        test_net(H, W, focal, renderer, render_poses, None, on_progress=save_img_fn, on_complete=save_video_fn)
+
+        return
+
+
+    '''
+    Start training
+    '''
+
+    print('>>> Start training')
+
+    N_rand = config.N_rand
 
     # Prepare ray batch tensor if batching random rays
-    N_rand = config.N_rand
     use_batching = not config.no_batching
     use_batching = False
     if use_batching:
@@ -284,17 +298,18 @@ def train_pipeline(config, device, out_dir):
     if use_batching:
         rays_rgb = torch.Tensor(rays_rgb).to(device)
 
-    '''
-    Start training
-    '''
-
     # Maximum training iterations
     N_iters = config.N_iters
+    if start_iter >= N_iters:
+        return
 
-    with tqdm(range(start_iter, N_iters)) as pbar:
+    with tqdm(range(1, N_iters + 1)) as pbar:
+        pbar.n = start_iter
+
         for i in pbar:
             # Show progress
-            pbar.set_description('Iter %d' % i)
+            pbar.set_description('Iter %d' % (global_steps + 1))
+            pbar.update()
 
             # Start time of the current iteration
             time0 = time.time()
@@ -308,7 +323,7 @@ def train_pipeline(config, device, out_dir):
 
                 i_batch += N_rand
                 if i_batch >= rays_rgb.shape[0]:
-                    print("Shuffle data after an epoch!")
+                    pbar.write("Shuffle data after an epoch!")
                     rand_idx = torch.randperm(rays_rgb.shape[0])
                     rays_rgb = rays_rgb[rand_idx]
                     i_batch = 0
@@ -332,33 +347,36 @@ def train_pipeline(config, device, out_dir):
             
             pbar.set_postfix(time=time.time() - time0, loss=loss.item(), psnr=psnr.item())
 
+
             '''
             Logging
             '''
+
             # Save training states
-            if i % config.i_ckpt == 0 and i > 0:
-                path = os.path.join(out_dir, '{:06d}.tar'.format(i))
+            if (global_steps + 1) % config.i_ckpt == 0:
+                path = os.path.join(out_dir, '{:06d}.tar'.format((global_steps + 1)))
                 torch.save({
                     'global_steps': global_steps,
-                    'network_fn_state_dict': model_fine.state_dict(),
-                    'network_fine_state_dict': model_coarse.state_dict(),
+                    'network_coarse_state_dict': model_coarse.state_dict(),
+                    'network_fine_state_dict': model_fine.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                 }, path)
-                print('Saved checkpoints at', path)
+                pbar.write('Saved checkpoints at', path)
 
             # Save testing results
-            if i % config.i_testset == 0 and i > 0:
-                test_save_dir = os.path.join(out_dir, 'test_{:06d}'.format(i))
+            if (global_steps + 1) % config.i_testset == 0:
+                test_save_dir = os.path.join(out_dir, 'test_{:06d}'.format(global_steps + 1))
                 os.makedirs(test_save_dir, exist_ok=True)
 
                 save_img_fn = lambda j, img: save_image(j, img, test_save_dir)
-                save_video_fn = lambda imgs: save_video(i, imgs, test_save_dir)
+                save_video_fn = lambda imgs: save_video(global_steps + 1, imgs, test_save_dir)
 
-                print('Testing (iter=%s)' % i)
+                pbar.write('Testing (iter=%s):' % (global_steps + 1))
 
-                with torch.no_grad():
-                    test_net(H, W, focal, renderer, torch.Tensor(poses[i_test]).to(device),
-                             on_progress=save_img_fn, on_complete=save_video_fn)
+                test_time, test_loss, test_psnr = test_net(H, W, focal, renderer, torch.Tensor(poses[i_test]).to(device), images[i_test],
+                            on_progress=save_img_fn, on_complete=save_video_fn)
+                
+                pbar.write('Testing results: [ Mean Time: %.4fs, Loss: %.4f, PSNR: %.4f ]' % (test_time, test_loss, test_psnr))
 
             """
             if i%config.i_print==0 or i < 10:
@@ -432,7 +450,6 @@ def main():
     parser.add_argument("--netchunk", type=int, default=1024*64, help='number of pts sent through network in parallel, decrease if running out of memory')
     parser.add_argument("--no_batching", action='store_true', help='only take random rays from 1 image at a time')
     parser.add_argument("--no_reload", action='store_true', help='do not reload weights from saved ckpt')
-    parser.add_argument("--ft_path", type=str, default=None, help='specific weights npy file to reload for coarse network')
     parser.add_argument("--gpu",   type=int, default=0, help='the index of gpu device')
     # Rendering options
     parser.add_argument("--N_samples", type=int, default=64, help='number of coarse samples per ray')
