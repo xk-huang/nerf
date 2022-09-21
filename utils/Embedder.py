@@ -4,11 +4,11 @@ import torch.nn.functional as F
 import math
 
 
-class Embedder():
+class Embedder(nn.Module):
     def __init__(self, input_dims, max_freq_pow, num_freqs, periodic_fns=[torch.sin, torch.cos],
                  log_sampling=True, include_input=True):
 
-        # super(Embedder, self).__init__()
+        super(Embedder, self).__init__()
         
         embed_fns = []
         out_dims = 0
@@ -29,5 +29,5 @@ class Embedder():
         self.embed_fns = embed_fns
         self.out_dims = out_dims
         
-    def __call__(self, inputs):
+    def forward(self, inputs):
         return torch.cat([fn(inputs) for fn in self.embed_fns], dim=-1)

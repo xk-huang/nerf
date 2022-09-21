@@ -1,0 +1,14 @@
+name = fern_coarse
+datadir = /mnt/disk_1/xiaoke/codes/yet-another-nerf/data/nerf_llff/fern/
+dataset_type = llff
+
+factor = 8
+llffhold = 8
+
+N_rand = 4096
+N_samples = 192
+N_importance = 0
+
+use_viewdirs = True
+raw_noise_std = 1e0
+render_test = True
